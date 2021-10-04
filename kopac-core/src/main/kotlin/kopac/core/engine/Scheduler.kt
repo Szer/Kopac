@@ -7,6 +7,12 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 class Scheduler {
+
+    companion object {
+        internal val globalLock = ReentrantLock()
+        internal val globalLockCond = globalLock.newCondition()
+    }
+
     private var workStack: Work? = null
     private val spinlock = SpinlockTTAS()
     private val lock = ReentrantLock()

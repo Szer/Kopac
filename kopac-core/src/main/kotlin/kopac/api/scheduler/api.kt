@@ -44,3 +44,7 @@ fun <T> Scheduler.run(xJ: KJob<T>): T {
         else -> throw Exception("Exception raised by KJob", e)
     }
 }
+
+fun create(c: Create): Scheduler {
+
+}
