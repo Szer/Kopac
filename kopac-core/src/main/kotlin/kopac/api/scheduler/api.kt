@@ -1,7 +1,8 @@
 package kopac.scheduler
 
-import kopac.core.engine.Scheduler
-import kopac.core.engine.StaticData
+import kopac.core.engine.*
+import kopac.core.engine.FailWork
+import kopac.core.engine.KillException
 import kopac.core.engine.Worker
 import kopac.core.flow.Cont
 import kopac.core.flow.ContState
@@ -13,10 +14,31 @@ private var warned = false
 data class Create(
     val foreground: Boolean? = null,
     val idleHandler: KJob<Int>? = null,
-    val maxStackSize: Int? = null,
+    val maxStackSize: Long? = null,
     val numWorkers: Int? = null,
     val topLevelHandler: ((Exception) -> KJob<Unit>)? = null
 )
+
+fun <T> Scheduler.run(me: Int) {
+    Worker.runningWork.set(1)
+
+    val wr = Worker(this)
+    val iK = IdleCont()
+    val wdm = (1L shl 32) / this.events.size
+    wr.event = this.events[me]
+    var isKilled = false
+    while (!isKilled) {
+        try {
+            TODO()
+        } catch (e: KillException) {
+            this.kill()
+            this.dec()
+            isKilled = true
+        } catch (e: Exception) {
+            wr.workStack = FailWork(wr.workStack, e, wr.handler)
+        }
+    }
+}
 
 fun <T> Scheduler.run(xJ: KJob<T>): T {
     val xK = object : ContState<T, Exception, Int, Cont<Unit>>(state2 = 0) {
@@ -63,10 +85,10 @@ fun createScheduler(c: Create): Scheduler {
         c.foreground ?: false,
         c.idleHandler,
         c.maxStackSize ?: 0,
-        when(val n = c.numWorkers) {
+        when (val n = c.numWorkers) {
             null -> Runtime.getRuntime().availableProcessors()
-            else ->  {
-                if(n < 1) {
+            else -> {
+                if (n < 1) {
                     error("Invalid number of workers specified: $n")
                 }
                 n

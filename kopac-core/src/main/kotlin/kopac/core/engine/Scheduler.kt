@@ -4,8 +4,14 @@ import kopac.core.flow.Cont
 import kopac.core.flow.KJob
 import kopac.core.util.SpinlockTTAS
 import kopac.scheduler.Create
+import kopac.scheduler.run
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+
+internal object KillException : Exception()
+
+internal class AbortWork: Work() {
+}
 
 class Scheduler {
 
@@ -13,6 +19,31 @@ class Scheduler {
 
         object Global {
             var create = Create()
+
+            fun defaultCreate(
+                foreground: Boolean,
+                idleHandler: KJob<Int>,
+                maxStackSize: Long,
+                numWorkers: Int,
+                topLevelHandler: (Exception) -> KJob<Unit>
+            ): Scheduler {
+                val s = Scheduler()
+                StaticData.init()
+                s.topLevelHandler = topLevelHandler
+                s.idleHandler = idleHandler
+                s.waiterStack = -1
+                s.numActive = numWorkers
+                s.events = Array(numWorkers, ::WorkerEvent)
+                val threads = Array(numWorkers) { i ->
+                    val thread = Thread(
+                        null,
+                        { s.run(i) },
+                        "Hopac.Worker $i/$numWorkers", maxStackSize
+                    )
+                }
+
+                return s
+            }
         }
 
         internal val globalLock = ReentrantLock()
@@ -27,12 +58,19 @@ class Scheduler {
     private var waiterStack = 0
     private var numActive = 0
     private var numPulseWaiters = 0
-    private val events: Array<WorkerEvent> = emptyArray()
+    internal var events: Array<WorkerEvent> = emptyArray()
+    internal var topLevelHandler: ((Exception) -> KJob<Unit>)? = null
+    internal var idleHandler: KJob<Int>? = null
 
     private inline fun withSpinLock(crossinline action: () -> Unit) {
         spinlock.enter()
         action()
         spinlock.exit()
+    }
+
+    internal fun kill() {
+        val work = AbortWork()
+        pushAll(work)
     }
 
     private fun unsafeSignal() {
@@ -71,6 +109,28 @@ class Scheduler {
             numWorkStack += n
             numActive -= 1
             assert(numActive >= 0)
+            unsafeSignal()
+        }
+    }
+
+    internal fun pushAll(work: Work?) {
+        if (work == null) return
+        var n = 1
+        var last: Work = work
+        var next = last.next
+        while(next != null) {
+            n += 1
+            last = next
+            next = last.next
+        }
+        push(work, last, n)
+    }
+
+    internal fun push(work: Work, last: Work, n: Int) {
+        withSpinLock {
+            last.next = workStack
+            workStack = work
+            numWorkStack += n
             unsafeSignal()
         }
     }
