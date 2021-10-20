@@ -2,13 +2,14 @@ package kopac.api
 
 import kopac.core.engine.Scheduler
 import kopac.core.engine.StaticData
+import kopac.scheduler.createScheduler
 import kotlin.concurrent.withLock
 
 fun reallyInitGlobalScheduler(): Scheduler {
     StaticData.init()
-    Scheduler.globalLock.withLock {
+    return Scheduler.globalLock.withLock {
         StaticData.globalScheduler ?: run {
-            val sr = Scheduler.create()
+            val sr = createScheduler(Scheduler.Companion.Global.create)
             StaticData.globalScheduler = sr
             sr
         }

@@ -10,6 +10,14 @@ import java.util.concurrent.atomic.AtomicInteger
 
 private var warned = false
 
+data class Create(
+    val foreground: Boolean? = null,
+    val idleHandler: KJob<Int>? = null,
+    val maxStackSize: Int? = null,
+    val numWorkers: Int? = null,
+    val topLevelHandler: ((Exception) -> KJob<Unit>)? = null
+)
+
 fun <T> Scheduler.run(xJ: KJob<T>): T {
     val xK = object : ContState<T, Exception, Int, Cont<Unit>>(state2 = 0) {
     }
@@ -45,6 +53,25 @@ fun <T> Scheduler.run(xJ: KJob<T>): T {
     }
 }
 
-fun create(c: Create): Scheduler {
-
+fun createScheduler(c: Create): Scheduler {
+    val create =
+        StaticData.createScheduler ?: run {
+            StaticData.init()
+            StaticData.createScheduler!!
+        }
+    return create.invoke(
+        c.foreground ?: false,
+        c.idleHandler,
+        c.maxStackSize ?: 0,
+        when(val n = c.numWorkers) {
+            null -> Runtime.getRuntime().availableProcessors()
+            else ->  {
+                if(n < 1) {
+                    error("Invalid number of workers specified: $n")
+                }
+                n
+            }
+        },
+        c.topLevelHandler
+    )
 }

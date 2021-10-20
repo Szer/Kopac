@@ -3,12 +3,18 @@ package kopac.core.engine
 import kopac.core.flow.Cont
 import kopac.core.flow.KJob
 import kopac.core.util.SpinlockTTAS
+import kopac.scheduler.Create
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 class Scheduler {
 
     companion object {
+
+        object Global {
+            var create = Create()
+        }
+
         internal val globalLock = ReentrantLock()
         internal val globalLockCond = globalLock.newCondition()
     }
