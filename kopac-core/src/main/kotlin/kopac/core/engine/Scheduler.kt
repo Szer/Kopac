@@ -50,7 +50,7 @@ class Scheduler {
         internal val globalLockCond = globalLock.newCondition()
     }
 
-    private var workStack: Work? = null
+    internal var workStack: Work? = null
     private val spinlock = SpinlockTTAS()
     private val lock = ReentrantLock()
     private val lockCond = lock.newCondition()
@@ -62,7 +62,7 @@ class Scheduler {
     internal var topLevelHandler: ((Exception) -> KJob<Unit>)? = null
     internal var idleHandler: KJob<Int>? = null
 
-    private inline fun withSpinLock(crossinline action: () -> Unit) {
+    internal inline fun withSpinLock(crossinline action: () -> Unit) {
         spinlock.enter()
         action()
         spinlock.exit()

@@ -19,6 +19,31 @@ data class Create(
     val topLevelHandler: ((Exception) -> KJob<Unit>)? = null
 )
 
+private class WtfStateMachine(val wr: Worker, val sr: Scheduler) {
+
+    private var work = wr.workStack
+
+    fun restart() {
+        work = wr.workStack
+        if (work == null) {
+            enterScheduler()
+        }
+        else {
+            workerLoop()
+        }
+    }
+
+    fun enterScheduler() {
+        work = sr.workStack
+        if(work == null) {
+            tryIdle()
+        }
+        sr.withSpinLock {
+            enteredScheduler()
+        }
+    }
+}
+
 fun <T> Scheduler.run(me: Int) {
     Worker.runningWork.set(1)
 
@@ -27,9 +52,13 @@ fun <T> Scheduler.run(me: Int) {
     val wdm = (1L shl 32) / this.events.size
     wr.event = this.events[me]
     var isKilled = false
+
+
+
     while (!isKilled) {
         try {
-            TODO()
+            val wtf = WtfStateMachine(wr, this)
+            wtf.restart()
         } catch (e: KillException) {
             this.kill()
             this.dec()
