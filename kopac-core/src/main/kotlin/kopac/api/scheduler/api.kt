@@ -1,4 +1,4 @@
-package kopac.scheduler
+package kopac.api.scheduler
 
 import kopac.core.engine.*
 import kopac.core.engine.FailWork
@@ -7,96 +7,168 @@ import kopac.core.engine.Worker
 import kopac.core.flow.Cont
 import kopac.core.flow.ContState
 import kopac.core.flow.KJob
+import kopac.core.util.ByRef
 import java.util.concurrent.atomic.AtomicInteger
 
-private var warned = false
-
 data class Create(
-    val foreground: Boolean? = null,
+    val isDaemon: Boolean? = null,
     val idleHandler: KJob<Int>? = null,
     val maxStackSize: Long? = null,
     val numWorkers: Int? = null,
-    val topLevelHandler: ((Exception) -> KJob<Unit>)? = null
+    val topLevelHandler: ((Throwable) -> KJob<Unit>)? = null
 )
 
-private class WtfStateMachine(val wr: Worker, val sr: Scheduler) {
+private class SchedulerStateMachine(val sr: Scheduler, val me: Int) {
 
+    private val wr = Worker(sr, sr.events[me])
+    private val wrByRef = ByRef(wr)
+    private val iK = IdleCont()
+    private val wdm = (1L shl 32) / sr.events.size
+
+    private enum class STATE {
+        RESTART,
+        WORKER_LOOP,
+        ENTER_SCHEDULER,
+        ENTERED_SCHEDULER,
+        SCHEDULER_GOT_SOME,
+        EXIT_AND_TRY_IDLE,
+        TRY_IDLE,
+    }
+
+    private var isKilled = false
+    private var state = STATE.RESTART
     private var work = wr.workStack
 
-    fun restart() {
-        work = wr.workStack
-        if (work == null) {
-            enterScheduler()
-        }
-        else {
-            workerLoop()
-        }
-    }
+    fun start() {
+        while (!isKilled) {
+            try {
+                when (state) {
+                    STATE.RESTART -> {
+                        work = wr.workStack
+                        if (work == null) {
+                            state = STATE.ENTER_SCHEDULER
+                        } else {
+                            state = STATE.WORKER_LOOP
+                        }
+                    }
+                    STATE.WORKER_LOOP -> {
+                        assert(work != null)
 
-    fun enterScheduler() {
-        work = sr.workStack
-        if(work == null) {
-            tryIdle()
-        }
-        sr.withSpinLock {
-            enteredScheduler()
-        }
-    }
-}
+                        wr.handler = work
+                        var next = work!!.next
+                        if (next != null && sr.workStack == null) {
+                            sr.pushAll(next)
+                            next = null
+                        }
+                        wr.workStack = next
+                        work!!.doWork(wrByRef)
+                        work = wr.workStack
+                        if (work != null)
+                            state = STATE.WORKER_LOOP
+                        else {
+                            wr.handler = null
+                            state = STATE.ENTER_SCHEDULER
+                        }
+                    }
+                    STATE.ENTER_SCHEDULER -> {
+                        if (work == null) {
+                            state = STATE.TRY_IDLE
+                        } else {
+                            sr.spinlock.enter()
+                            state = STATE.ENTERED_SCHEDULER
+                        }
+                    }
+                    STATE.ENTERED_SCHEDULER -> {
+                        work = sr.workStack
+                        if (work == null)
+                            state = STATE.EXIT_AND_TRY_IDLE
+                        else
+                            state = STATE.SCHEDULER_GOT_SOME
+                    }
+                    STATE.SCHEDULER_GOT_SOME -> {
+                        assert(work != null)
+                        var last = work
+                        val numWorkStack = sr.numWorkStack
+                        var n = ((numWorkStack) * wdm shr 32).toInt() + 1
+                        sr.numWorkStack = numWorkStack - n
+                        n -= 1
+                        while (n > 0) {
+                            last = last!!.next
+                            n -= 1
+                        }
+                        val next = last!!.next
+                        last.next = null
+                        sr.workStack = null
+                        if (next != null) {
+                            sr.unsafeSignal()
+                        }
+                        sr.spinlock.exit()
+                        state = STATE.WORKER_LOOP
+                    }
+                    STATE.EXIT_AND_TRY_IDLE -> {
+                        sr.spinlock.exit()
+                        state = STATE.TRY_IDLE
+                    }
+                    STATE.TRY_IDLE -> {
+                        iK.value = Int.MAX_VALUE
+                        val iJ = sr.idleHandler
+                        if (iJ != null) {
+                            wr.handler = iK
+                            iJ.doJob(wrByRef, iK)
+                        }
 
-fun <T> Scheduler.run(me: Int) {
-    Worker.runningWork.set(1)
-
-    val wr = Worker(this)
-    val iK = IdleCont()
-    val wdm = (1L shl 32) / this.events.size
-    wr.event = this.events[me]
-    var isKilled = false
-
-
-
-    while (!isKilled) {
-        try {
-            val wtf = WtfStateMachine(wr, this)
-            wtf.restart()
-        } catch (e: KillException) {
-            this.kill()
-            this.dec()
-            isKilled = true
-        } catch (e: Exception) {
-            wr.workStack = FailWork(wr.workStack, e, wr.handler)
-        }
-    }
-}
-
-fun <T> Scheduler.run(xJ: KJob<T>): T {
-    val xK = object : ContState<T, Exception, Int, Cont<Unit>>(state2 = 0) {
-    }
-
-    this.runOnThisThread(xJ, xK)
-
-    val v = AtomicInteger(xK.state2!!)
-    if (v.get() >= 0) {
-        xK.lock.lock()
-        val w = AtomicInteger(v.get())
-        if (w.get() >= 0) {
-            if (v.getAndUpdate { w.get().inv() } == 0) {
-                if (!warned && Worker.runningWork.get() > 0) {
-                    warned = true
-                    StaticData.writeLine(
-                        "WARNING: You are making a blocking call to run a Hopac job " +
-                            "from within a Hopac job, which means that your program may " +
-                            "deadlock."
-                    )
-                    StaticData.writeLine("First occurrence (there may be others):")
-                    StaticData.writeLine(Thread.currentThread().stackTrace.joinToString("\n"))
+                        if (iK.value == 0)
+                            state = STATE.RESTART
+                        else {
+                            sr.spinlock.enter()
+                            work = sr.workStack
+                            if (work != null)
+                                state = STATE.SCHEDULER_GOT_SOME
+                            else {
+                                sr.unsafeWait(iK.value, wr.event!!)
+                                state = STATE.ENTERED_SCHEDULER
+                            }
+                        }
+                    }
                 }
-                xK.lock.unlock()
-                xK.lockCond.signalAll()
-                xK.lockCond.await()
+            } catch (e: KillException) {
+                sr.kill()
+                sr.dec()
+                isKilled = true
+            } catch (e: Exception) {
+                wr.workStack = FailWork(wr.workStack, e, wr.handler)
             }
         }
     }
+}
+
+fun Scheduler.run(me: Int) {
+    Worker.runningWork.set(1)
+    SchedulerStateMachine(this, me).start()
+}
+
+fun <T> Scheduler.run(xJ: KJob<T>): T {
+    val xK = object : ContState<T, Throwable, AtomicInteger, Cont<Unit>>(state2 = AtomicInteger(0)) {
+        override fun doHandle(worker: ByRef<Worker>, e: Throwable) {
+            terminate(worker, state3)
+            state1 = e
+            pulse(state2!!)
+        }
+
+        override fun doWork(worker: ByRef<Worker>) {
+            terminate(worker, state3)
+            pulse(state2!!)
+        }
+
+        override fun doCont(worker: ByRef<Worker>, value: T) {
+            terminate(worker, state3)
+            this.value = value
+            pulse(state2!!)
+        }
+    }
+
+    this.runOnThisThread(xJ, xK)
+    xK.wait(xK.state2!!)
 
     return when (val e = xK.state1) {
         null -> xK.value // cont
@@ -111,7 +183,7 @@ fun createScheduler(c: Create): Scheduler {
             StaticData.createScheduler!!
         }
     return create.invoke(
-        c.foreground ?: false,
+        c.isDaemon ?: true,
         c.idleHandler,
         c.maxStackSize ?: 0,
         when (val n = c.numWorkers) {

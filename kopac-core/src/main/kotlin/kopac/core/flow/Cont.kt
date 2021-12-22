@@ -2,6 +2,7 @@ package kopac.core.flow
 
 import kopac.core.engine.Work
 import kopac.core.engine.Worker
+import kopac.core.util.ByRef
 
 abstract class Cont<T> : Work() {
     private var maybeValue: T? = null
@@ -11,7 +12,7 @@ abstract class Cont<T> : Work() {
             maybeValue = value
         }
 
-    internal abstract fun doCont(worker: Worker, value: T)
+    internal abstract fun doCont(worker: ByRef<Worker>, value: T)
 }
 
 internal abstract class ContState<T, S1, S2, S3>(

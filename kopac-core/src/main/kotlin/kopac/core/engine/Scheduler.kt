@@ -1,16 +1,24 @@
 package kopac.core.engine
 
+import kopac.api.scheduler.Create
+import kopac.api.scheduler.run
 import kopac.core.flow.Cont
 import kopac.core.flow.KJob
+import kopac.core.util.ByRef
 import kopac.core.util.SpinlockTTAS
-import kopac.scheduler.Create
-import kopac.scheduler.run
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 internal object KillException : Exception()
 
-internal class AbortWork: Work() {
+internal class AbortWork : Work() {
+    override fun doWork(worker: ByRef<Worker>) {
+        throw KillException
+    }
+
+    override fun doHandle(worker: ByRef<Worker>, e: Throwable) {
+        throw KillException
+    }
 }
 
 class Scheduler {
@@ -21,11 +29,11 @@ class Scheduler {
             var create = Create()
 
             fun defaultCreate(
-                foreground: Boolean,
-                idleHandler: KJob<Int>,
+                isDaemon: Boolean,
+                idleHandler: KJob<Int>?,
                 maxStackSize: Long,
                 numWorkers: Int,
-                topLevelHandler: (Exception) -> KJob<Unit>
+                topLevelHandler: ((Throwable) -> KJob<Unit>)?
             ): Scheduler {
                 val s = Scheduler()
                 StaticData.init()
@@ -33,13 +41,16 @@ class Scheduler {
                 s.idleHandler = idleHandler
                 s.waiterStack = -1
                 s.numActive = numWorkers
-                s.events = Array(numWorkers, ::WorkerEvent)
-                val threads = Array(numWorkers) { i ->
+                s.events = Array(numWorkers) { i ->
+                    val ev = WorkerEvent(i)
                     val thread = Thread(
                         null,
                         { s.run(i) },
                         "Hopac.Worker $i/$numWorkers", maxStackSize
                     )
+                    thread.isDaemon = isDaemon
+                    thread.start()
+                    ev
                 }
 
                 return s
@@ -51,15 +62,15 @@ class Scheduler {
     }
 
     internal var workStack: Work? = null
-    private val spinlock = SpinlockTTAS()
+    internal val spinlock = SpinlockTTAS()
     private val lock = ReentrantLock()
     private val lockCond = lock.newCondition()
-    private var numWorkStack = 0
+    internal var numWorkStack = 0
     private var waiterStack = 0
     private var numActive = 0
     private var numPulseWaiters = 0
     internal var events: Array<WorkerEvent> = emptyArray()
-    internal var topLevelHandler: ((Exception) -> KJob<Unit>)? = null
+    internal var topLevelHandler: ((Throwable) -> KJob<Unit>)? = null
     internal var idleHandler: KJob<Int>? = null
 
     internal inline fun withSpinLock(crossinline action: () -> Unit) {
@@ -73,14 +84,14 @@ class Scheduler {
         pushAll(work)
     }
 
-    private fun unsafeSignal() {
+    fun unsafeSignal() {
         val waiter = waiterStack
         if (waiter >= 0) {
             val ev = events[waiter]
             waiterStack = ev.next
             assert(numActive >= 0)
             numActive += 1
-            ev.release(Int.MAX_VALUE)
+            ev.set()
         }
     }
 
@@ -91,7 +102,7 @@ class Scheduler {
         }
     }
 
-    internal fun dec() {
+    internal fun unsafeDec() {
         val numActive = numActive - 1
         this.numActive = numActive
         assert(this.numActive >= 0)
@@ -99,6 +110,12 @@ class Scheduler {
             lock.withLock {
                 lockCond.signalAll()
             }
+        }
+    }
+
+    internal fun dec() {
+        withSpinLock {
+            unsafeDec()
         }
     }
 
@@ -118,7 +135,7 @@ class Scheduler {
         var n = 1
         var last: Work = work
         var next = last.next
-        while(next != null) {
+        while (next != null) {
             n += 1
             last = next
             next = last.next
@@ -154,19 +171,47 @@ class Scheduler {
     }
 
     internal fun <T> runOnThisThread(tJ: KJob<T>, tK: Cont<T>) {
-        val wr = Worker(this)
+        val wr = Worker(this, null)
+        val wrByRef = ByRef(wr)
         val d = Worker.runningWork.get()
         Worker.runningWork.set(d + 1)
         inc()
 
         try {
             wr.handler = tK
-            tJ.doJob(wr, tK)
+            tJ.doJob(wrByRef, tK)
         } catch (e: Exception) {
             wr.workStack = FailWork(wr.workStack, e, wr.handler)
         }
 
         pushAllAndDec(wr.workStack)
         Worker.runningWork.set(d)
+    }
+
+    internal fun unsafeWait(ms: Int, event: WorkerEvent) {
+        event.next = waiterStack
+        waiterStack = event.me
+        unsafeDec()
+        spinlock.exit()
+        event.waitOne(ms.toLong())
+        spinlock.enter()
+        if (event.isSet())
+            event.reset()
+        else {
+            assert(numActive >= 0)
+            numActive += 1
+            val i = waiterStack
+            val me = event.me
+            if (i == me) {
+                waiterStack = event.next
+            } else {
+                var p = events[i]
+                while (p.next != me) {
+                    p = events[p.next]
+                }
+                p.next = event.next
+            }
+        }
+
     }
 }

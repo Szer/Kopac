@@ -6,12 +6,11 @@ object StaticData {
     private var isInit = false
     lateinit var writeLine: (String) -> Unit
     var globalScheduler: Scheduler? = null
-    var createScheduler: ((Boolean, KJob<Int>?, Int, Int, ((Exception) -> KJob<Unit>)?) -> Scheduler)? = null
+    var createScheduler: ((Boolean, KJob<Int>?, Long, Int, ((Throwable) -> KJob<Unit>)?) -> Scheduler)? = null
     fun init() {
         if (!isInit) {
-            StaticData.writeLine = ::println
-
-
+            createScheduler = Scheduler.Companion.Global::defaultCreate
+            writeLine = ::println
             isInit = true
         }
     }

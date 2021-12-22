@@ -2,7 +2,7 @@ package kopac.api
 
 import kopac.core.engine.Scheduler
 import kopac.core.engine.StaticData
-import kopac.scheduler.createScheduler
+import kopac.api.scheduler.createScheduler
 import kotlin.concurrent.withLock
 
 fun reallyInitGlobalScheduler(): Scheduler {
