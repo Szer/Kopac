@@ -9,11 +9,7 @@ internal class Worker(internal val sr: Scheduler, internal var event: WorkerEven
     internal var handler: Handler? = null
 
     companion object {
-        internal val runningWork: ThreadLocal<Int> = run {
-            val tl = ThreadLocal<Int>()
-            tl.set(0)
-            tl
-        }
+        internal val runningWork = ThreadLocal.withInitial { 0 }
     }
 }
 

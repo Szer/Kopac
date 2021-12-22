@@ -34,9 +34,9 @@ abstract class Handler {
                         StaticData.writeLine("First occurrence (there may be others):")
                         StaticData.writeLine(Thread.currentThread().stackTrace.joinToString("\n"))
                     }
-                    lock.unlock()
                     lockCond.signalAll()
-                    lockCond.await()
+                    lock.unlock()
+                    lock.lock()
                 }
             }
         }
